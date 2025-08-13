@@ -29,20 +29,29 @@
 ### 一键安装（推荐）
 在仓库根目录执行：
 ```bash
-# 系统安装
+# 系统安装（安装到 /usr/local/bin，需要 sudo）
 sudo ./install.sh
 
 # 或者仅为当前用户安装（确保 ~/.local/bin 在 PATH 中）
 PREFIX="$HOME/.local" ./install.sh
 ```
 
+高级选项：
+```bash
+SKIP_DEPS=1 ./install.sh        # 跳过自动安装 fzf 与搜索后端
+SKIP_UPDATEDB=1 ./install.sh    # 安装依赖但跳过执行 updatedb
+PREFIX="$HOME/.local" ./install.sh  # 安装到用户目录（无需 sudo）
+```
+
 安装脚本会：
-- 安装核心 `到` 到 `$PREFIX/bin/to`（默认 `/usr/local/bin/to`）
-- 安装 fzf 和 plocate 
+- 安装核心 `to` 到 `$PREFIX/bin/to`（默认 `/usr/local/bin/to`）
 - 安装并接入各 Shell 包装：
   - Zsh：将 `to.zsh` 安装到 `~/.to-cd/to.zsh` 并写入 `~/.zshrc` 的 `source` 行
   - Bash：将 `to.bash` 安装到 `~/.to-cd/to.bash` 并写入 `~/.bashrc` 的 `source` 行（并确保登录 shell 也加载）
   - Fish：将 `to.fish` 安装到 `~/.config/fish/functions/to.fish`
+- 自动安装依赖（默认开启，可被 SKIP_DEPS 关闭）：
+  - 优先安装 plocate；若不可用则尝试 mlocate、fd/fdfind（在 macOS 使用 Homebrew 安装 fd/fzf）
+  - 若系统存在 `updatedb`，会自动执行一次（可被 SKIP_UPDATEDB 关闭）
 
 完成后，重载对应 Shell：
 ```bash
@@ -55,6 +64,7 @@ source ~/.bashrc  # 或 exec bash
 # Fish
 exec fish
 ```
+
 
 ### 手动安装（可选）
 把核心可执行文件放到 PATH（如 `/usr/local/bin`），再添加对应的包装函数。
