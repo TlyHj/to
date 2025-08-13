@@ -29,15 +29,16 @@
 ### 一键安装（推荐）
 在仓库根目录执行：
 ```bash
-# 系统安装（将可执行文件放到 /usr/local/bin，需要 sudo）
+# 系统安装
 sudo ./install.sh
 
-# 或者仅为当前用户安装（不需要 sudo，需确保 ~/.local/bin 在 PATH 中）
+# 或者仅为当前用户安装（确保 ~/.local/bin 在 PATH 中）
 PREFIX="$HOME/.local" ./install.sh
 ```
 
 安装脚本会：
 - 安装核心 `到` 到 `$PREFIX/bin/to`（默认 `/usr/local/bin/to`）
+- 安装 fzf 和 plocate 
 - 安装并接入各 Shell 包装：
   - Zsh：将 `to.zsh` 安装到 `~/.to-cd/to.zsh` 并写入 `~/.zshrc` 的 `source` 行
   - Bash：将 `to.bash` 安装到 `~/.to-cd/to.bash` 并写入 `~/.bashrc` 的 `source` 行（并确保登录 shell 也加载）
