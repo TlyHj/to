@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 prefix="${PREFIX:-/usr/local}"
 bindir="${prefix}/bin"
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 skip_deps="${SKIP_DEPS:-0}"
 skip_updatedb="${SKIP_UPDATEDB:-0}"
 selected_shells="auto"
@@ -98,6 +98,91 @@ parse_args() {
   done
 }
 
+shell_init_line() {
+  case "$1" in
+    bash) printf '%s\n' '[ -r "$HOME/.to-cd/to.bash" ] && . "$HOME/.to-cd/to.bash"' ;;
+    zsh)  printf '%s\n' '[ -r "$HOME/.to-cd/to.zsh" ] && source "$HOME/.to-cd/to.zsh"' ;;
+    fish) printf '%s\n' '# fish 自动加载 ~/.config/fish/functions/to.fish，无需额外 init' ;;
+    *) return 1 ;;
+  esac
+}
+
+resolve_shells() {
+  local raw="$1"
+  if [[ "$raw" == "auto" ]]; then
+    printf '%s\n' "$(detect_current_shell)"
+    return 0
+  fi
+  if [[ "$raw" == "all" ]]; then
+    printf '%s\n' bash zsh fish
+    return 0
+  fi
+
+  local item
+  local -a out=()
+  IFS=',' read -r -a out <<< "$raw"
+  for item in "${out[@]}"; do
+    item="$(printf '%s' "$item" | tr '[:upper:]' '[:lower:]')"
+    normalize_shell_name "$item" >/dev/null || die "不支持的 shell：$item"
+    [[ "$item" == "auto" || "$item" == "all" ]] && die "auto/all 不能和其他 shell 混用"
+    printf '%s\n' "$item"
+  done
+}
+
+ensure_line() {
+  local file="$1" line="$2"
+  mkdir -p "$(dirname "$file")"
+  touch "$file"
+  grep -Fqx "$line" "$file" 2>/dev/null || printf '\n%s\n' "$line" >> "$file"
+}
+
+ensure_bash_profile_loads_bashrc() {
+  local profile="$HOME/.bash_profile"
+  if [[ ! -f "$profile" ]] || ! grep -Eq '(\.|source) +~\/\.bashrc' "$profile" 2>/dev/null; then
+    {
+      echo ''
+      echo '# Load ~/.bashrc for login shells'
+      echo 'if [ -f ~/.bashrc ]; then . ~/.bashrc; fi'
+    } >> "$profile"
+  fi
+}
+
+install_file() {
+  local src="$1" dest="$2" mode="${3:-755}"
+  if mkdir -p "$(dirname "$dest")" 2>/dev/null; then
+    install -Dm"$mode" "$src" "$dest"
+  else
+    $SUDO install -Dm"$mode" "$src" "$dest"
+  fi
+}
+
+install_core() {
+  log "[+] 安装核心可执行文件到 ${bindir}/to"
+  install_file "${script_dir}/to" "${bindir}/to" 755
+}
+
+install_shell_integration() {
+  local sh="$1"
+  case "$sh" in
+    bash)
+      install_file "${script_dir}/to.bash" "$HOME/.to-cd/to.bash" 644
+      ensure_line "$HOME/.bashrc" "$(shell_init_line bash)"
+      ensure_bash_profile_loads_bashrc
+      [[ -f "$HOME/.profile" ]] && ensure_line "$HOME/.profile" "$(shell_init_line bash)"
+      log "[+] 已接入 Bash"
+      ;;
+    zsh)
+      install_file "${script_dir}/to.zsh" "$HOME/.to-cd/to.zsh" 644
+      ensure_line "$HOME/.zshrc" "$(shell_init_line zsh)"
+      log "[+] 已接入 Zsh"
+      ;;
+    fish)
+      install_file "${script_dir}/to.fish" "$HOME/.config/fish/functions/to.fish" 644
+      log "[+] 已接入 Fish"
+      ;;
+  esac
+}
+
 detect_pm() {
   if have_cmd apt-get; then echo apt; return; fi
   if have_cmd pacman; then echo pacman; return; fi
@@ -161,6 +246,7 @@ install_deps() {
   esac
 
   log "[i] 当前依赖状态："
+  local c
   for c in plocate mlocate fd fdfind fzf; do
     if have_cmd "$c"; then
       log "    - $c: OK ($(command -v "$c"))"
@@ -177,170 +263,10 @@ install_deps() {
   fi
 }
 
-ensure_line() {
-  local file="$1" line="$2"
-  mkdir -p "$(dirname "$file")"
-  touch "$file"
-  grep -Fqx "$line" "$file" 2>/dev/null || printf '\n%s\n' "$line" >> "$file"
-}
-
-shell_init_line() {
-  case "$1" in
-    bash) printf '%s\n' '[ -r "$HOME/.to-cd/to.bash" ] && . "$HOME/.to-cd/to.bash"' ;;
-    zsh)  printf '%s\n' 'source "$HOME/.to-cd/to.zsh"' ;;
-    fish) printf '%s\n' '# fish 自动加载 ~/.config/fish/functions/to.fish，无需额外 init' ;;
-    *) return 1 ;;
-  esac
-}
-
-write_bash_wrapper() {
-  local dest="$HOME/.to-cd/to.bash"
-  mkdir -p "$(dirname "$dest")"
-  cat > "$dest" <<'EOF'
-# Bash / POSIX 兼容包装
-_to_bin() {
-  if [ -n "${TO_BIN:-}" ] && [ -x "${TO_BIN}" ]; then
-    printf '%s\n' "$TO_BIN"
-    return 0
-  fi
-  type -P to 2>/dev/null || { [ -x /usr/local/bin/to ] && printf '%s\n' /usr/local/bin/to; } || return 1
-}
-
-to() {
-  local _bin dir
-  _bin="$(_to_bin)" || {
-    echo "未找到核心可执行文件 to" >&2
-    return 127
-  }
-  dir=$(command "$_bin" "$@") || return
-  builtin cd -- "$dir"
-}
-EOF
-}
-
-write_zsh_wrapper() {
-  local dest="$HOME/.to-cd/to.zsh"
-  mkdir -p "$(dirname "$dest")"
-  cat > "$dest" <<'EOF'
-# Zsh 包装
-_to_bin() {
-  if [[ -n "${TO_BIN:-}" && -x "${TO_BIN}" ]]; then
-    print -r -- "$TO_BIN"
-    return 0
-  fi
-  whence -p to 2>/dev/null || { [[ -x /usr/local/bin/to ]] && print -r -- /usr/local/bin/to; } || return 1
-}
-
-to() {
-  local _bin dir
-  _bin="$(_to_bin)" || {
-    echo "未找到核心可执行文件 to" >&2
-    return 127
-  }
-  dir=$(command "$_bin" "$@") || return
-  builtin cd -- "$dir"
-}
-EOF
-}
-
-write_fish_wrapper() {
-  local dest="$HOME/.config/fish/functions/to.fish"
-  mkdir -p "$(dirname "$dest")"
-  cat > "$dest" <<'EOF'
-function __to_bin
-  if test -n "$TO_BIN"; and test -x "$TO_BIN"
-    echo "$TO_BIN"
-    return 0
-  end
-  set -l p (type -p to 2>/dev/null)
-  if test -n "$p"
-    echo "$p"
-    return 0
-  end
-  if test -x /usr/local/bin/to
-    echo /usr/local/bin/to
-    return 0
-  end
-  return 1
-end
-
-function to
-  set -l _bin (__to_bin)
-  if test $status -ne 0
-    echo "未找到核心可执行文件 to" >&2
-    return 127
-  end
-  set -l dir (command $_bin $argv)
-  if test $status -ne 0
-    return
-  end
-  cd -- $dir
-end
-EOF
-}
-
-install_core() {
-  log "[+] 安装核心可执行文件到 ${bindir}/to"
-  if mkdir -p "$bindir" 2>/dev/null; then
-    install -Dm755 "${script_dir}/to" "${bindir}/to"
-  else
-    $SUDO install -Dm755 "${script_dir}/to" "${bindir}/to"
-  fi
-}
-
-resolve_shells() {
-  local raw="$1"
-  if [[ "$raw" == "auto" ]]; then
-    printf '%s\n' "$(detect_current_shell)"
-    return 0
-  fi
-  if [[ "$raw" == "all" ]]; then
-    printf '%s\n' bash zsh fish
-    return 0
-  fi
-
-  local item
-  local -a out=()
-  IFS=',' read -r -a out <<< "$raw"
-  for item in "${out[@]}"; do
-    item="$(printf '%s' "$item" | tr '[:upper:]' '[:lower:]')"
-    normalize_shell_name "$item" >/dev/null || die "不支持的 shell：$item"
-    [[ "$item" == "auto" || "$item" == "all" ]] && die "auto/all 不能和其他 shell 混用"
-    printf '%s\n' "$item"
-  done
-}
-
-install_shell_integration() {
-  local sh="$1"
-  case "$sh" in
-    bash)
-      write_bash_wrapper
-      ensure_line "$HOME/.bashrc" "$(shell_init_line bash)"
-      if [[ ! -f "$HOME/.bash_profile" ]] || ! grep -Eq '(\.|source) +~\/\.bashrc' "$HOME/.bash_profile" 2>/dev/null; then
-        {
-          echo ''
-          echo '# Load ~/.bashrc for login shells'
-          echo 'if [ -f ~/.bashrc ]; then . ~/.bashrc; fi'
-        } >> "$HOME/.bash_profile"
-      fi
-      [[ -f "$HOME/.profile" ]] && ensure_line "$HOME/.profile" "$(shell_init_line bash)"
-      log "[+] 已接入 Bash"
-      ;;
-    zsh)
-      write_zsh_wrapper
-      ensure_line "$HOME/.zshrc" "$(shell_init_line zsh)"
-      log "[+] 已接入 Zsh"
-      ;;
-    fish)
-      write_fish_wrapper
-      log "[+] 已接入 Fish"
-      ;;
-  esac
-}
-
 print_reload_hint() {
   local shells="$1"
   log "[✓] 安装完成"
+  local sh
   for sh in $shells; do
     case "$sh" in
       bash) log "  Bash: source ~/.bashrc  或  exec bash" ;;
@@ -356,6 +282,7 @@ main() {
   if (( print_init_only == 1 )); then
     selected_shells="$(printf '%s' "$selected_shells" | tr '[:upper:]' '[:lower:]')"
     normalize_shell_name "$selected_shells" >/dev/null || die "不支持的 shell：$selected_shells"
+    [[ "$selected_shells" == "auto" || "$selected_shells" == "all" ]] && die "--print-init 只支持 bash|zsh|fish"
     shell_init_line "$selected_shells"
     exit 0
   fi

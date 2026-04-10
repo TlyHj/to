@@ -5,6 +5,7 @@
 - 支持的 Shell：Zsh、Bash、Fish
 - 核心可执行文件：`to`（只输出选中目录路径），由 shell 包装函数执行 `cd`
 - 安装入口：统一使用 `install.sh`
+- 卸载入口：统一使用 `uninstall.sh`
 
 ## 这次重构解决了什么
 
@@ -14,10 +15,11 @@
 - 安装脚本职责太多、路径也不够统一
 
 现在改成：
-- **统一入口：只跑一个 `install.sh`**
+- **统一入口：安装跑 `install.sh`，卸载跑 `uninstall.sh`**
 - **默认自动识别当前 shell** 并完成接入
 - 也支持一次接入多个 shell
 - 支持仅打印初始化片段，方便手动安装或二次集成
+- 包装函数与安装器解耦，后续维护更直接
 
 ## 特性
 - 最近目录缓存（`~/.to_recent_dirs`），命中优先
@@ -28,6 +30,7 @@
 - 内置缓存管理：支持列出 / 清空 / 删除缓存项
 - 直接路径跳转：`to ../project`、`to ~/code/demo`
 - 包装函数支持 `TO_BIN` 覆盖核心可执行文件路径
+- 安装 / 卸载支持多 shell 统一管理
 
 ## 依赖
 - 必需：任一 Shell（Zsh/Bash/Fish）
@@ -87,7 +90,42 @@ sudo ./install.sh
 - dotfiles 管理
 - 自定义安装流程
 
+## 卸载
+
+### 1）默认卸载
+
+```bash
+./uninstall.sh
+```
+
+行为：
+- 删除核心可执行文件
+- 删除 Bash / Zsh / Fish 的接入包装文件
+- 清理对应 shell 配置中的接入行
+- 默认保留缓存文件 `~/.to_recent_dirs`
+
+### 2）卸载指定安装前缀
+
+```bash
+./uninstall.sh --prefix "$HOME/.local"
+```
+
+### 3）只卸载部分 shell 接入
+
+```bash
+./uninstall.sh --shell bash
+./uninstall.sh --shell zsh,fish
+```
+
+### 4）连缓存一起删掉
+
+```bash
+./uninstall.sh --remove-cache
+```
+
 ## 命令行参数
+
+### install.sh
 
 ```bash
 ./install.sh --prefix <PATH>
@@ -95,6 +133,14 @@ sudo ./install.sh
 ./install.sh --skip-deps
 ./install.sh --skip-updatedb
 ./install.sh --print-init <bash|zsh|fish>
+```
+
+### uninstall.sh
+
+```bash
+./uninstall.sh --prefix <PATH>
+./uninstall.sh --shell <bash|zsh|fish|all>
+./uninstall.sh --remove-cache
 ```
 
 ## 使用
@@ -128,6 +174,21 @@ export TO_BIN="$HOME/.local/bin/to"
   - 有 `fzf`：进入模糊选择
   - 无 `fzf`：进入数字菜单
 
+## 为什么需要 shell 包装
+
+`cd` 是 shell 内建命令，外部可执行文件不能直接修改你当前终端的工作目录。
+所以这里拆成两层：
+
+1. 核心程序 `to`
+   - 只负责找目录
+   - 只向标准输出打印最终目录路径
+2. shell 包装函数
+   - 调用核心程序
+   - 读取输出结果
+   - 在当前 shell 里执行 `cd`
+
+这也是为什么安装时除了放置可执行文件，还需要把包装函数接入 Bash / Zsh / Fish。
+
 ## 安装后接入位置
 - Bash：`~/.bashrc`
 - Zsh：`~/.zshrc`
@@ -137,6 +198,30 @@ export TO_BIN="$HOME/.local/bin/to"
 - `~/.to-cd/to.bash`
 - `~/.to-cd/to.zsh`
 - `~/.config/fish/functions/to.fish`
+
+## 常见场景
+
+### 安装到用户目录并手动接入
+
+```bash
+./install.sh --prefix "$HOME/.local" --skip-deps
+./install.sh --print-init zsh
+```
+
+然后把输出的初始化片段写入你自己的 shell 配置。
+
+### 只想给 Bash 和 Zsh 接入
+
+```bash
+./install.sh --shell bash,zsh
+```
+
+### 重装
+
+```bash
+./uninstall.sh
+./install.sh
+```
 
 ## 故障排查
 
@@ -150,6 +235,7 @@ type -a to
 
 ```bash
 ./install.sh --help
+./uninstall.sh --help
 ```
 
 单独测试核心脚本：
