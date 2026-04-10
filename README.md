@@ -24,6 +24,9 @@
 ## 特性
 - 最近目录缓存（`~/.to_recent_dirs`），命中优先
 - 多后端搜索：`plocate` / `fd (fdfind)` / `find`，自动兜底
+- 搜索默认优先用户常用目录，避免直接粗暴扫整个 `/`
+- 默认排除 `/proc`、`/sys`、`/dev`、`/run`、`/tmp` 等无意义目录
+- 命中结果会按 basename 精确度、是否位于用户目录、路径长度做排序
 - 交互筛选：安装 `fzf` 时提供模糊筛选界面
 - 路径安全：正确处理空格/特殊字符
 - 多 Shell 支持：Zsh、Bash、Fish
@@ -164,11 +167,22 @@ to -r ~/code/demo
 ```bash
 export TO_MAX_CACHE=50
 export TO_BIN="$HOME/.local/bin/to"
+export TO_SEARCH_MAX_DEPTH=6
+export TO_SEARCH_ROOTS="$HOME /opt /srv /usr/local /var/www"
+export TO_SEARCH_EXCLUDES="/proc /sys /dev /run /tmp /mnt /media /var/tmp /snap"
 ```
 
 ## 工作方式
 - 若参数本身就是已存在目录：直接输出该目录绝对路径并写入缓存
-- 否则先查最近缓存，再查 `plocate` / `fd` / `find`
+- 否则先查最近缓存，再查系统搜索结果
+- 系统搜索优先走 `plocate`
+- 若没有合适结果，再走 `fd` / `fdfind` / `find`
+- `fd/find` 默认只扫常用根目录，不直接粗扫整个根文件系统
+- 命中结果会优先考虑：
+  - basename 精确命中
+  - basename 前缀命中
+  - 用户目录下的结果
+  - 更短、更浅的路径
 - 命中 1 个结果时直接输出
 - 命中多个结果时：
   - 有 `fzf`：进入模糊选择
@@ -214,6 +228,13 @@ export TO_BIN="$HOME/.local/bin/to"
 
 ```bash
 ./install.sh --shell bash,zsh
+```
+
+### 自定义搜索范围
+
+```bash
+export TO_SEARCH_ROOTS="$HOME ~/work /srv/projects"
+export TO_SEARCH_MAX_DEPTH=5
 ```
 
 ### 重装

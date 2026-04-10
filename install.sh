@@ -18,6 +18,8 @@ have_cmd() { command -v "$1" >/dev/null 2>&1; }
 log() { printf '%s\n' "$*"; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
+to_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
 usage() {
   cat <<'EOF'
 统一安装脚本
@@ -53,9 +55,10 @@ normalize_shell_name() {
 
 detect_current_shell() {
   local sh="${SHELL##*/}"
+  sh="$(to_lower "$sh")"
   case "$sh" in
     bash|zsh|fish) printf '%s\n' "$sh" ;;
-    *) printf '%s\n' "bash" ;;
+    *) printf '%s\n' bash ;;
   esac
 }
 
@@ -107,22 +110,52 @@ shell_init_line() {
   esac
 }
 
+shell_wrapper_source() {
+  case "$1" in
+    bash) printf '%s\n' "${script_dir}/to.bash" ;;
+    zsh)  printf '%s\n' "${script_dir}/to.zsh" ;;
+    fish) printf '%s\n' "${script_dir}/to.fish" ;;
+    *) return 1 ;;
+  esac
+}
+
+shell_wrapper_dest() {
+  case "$1" in
+    bash) printf '%s\n' "$HOME/.to-cd/to.bash" ;;
+    zsh)  printf '%s\n' "$HOME/.to-cd/to.zsh" ;;
+    fish) printf '%s\n' "$HOME/.config/fish/functions/to.fish" ;;
+    *) return 1 ;;
+  esac
+}
+
+shell_rc_file() {
+  case "$1" in
+    bash) printf '%s\n' "$HOME/.bashrc" ;;
+    zsh)  printf '%s\n' "$HOME/.zshrc" ;;
+    *) return 1 ;;
+  esac
+}
+
 resolve_shells() {
   local raw="$1"
-  if [[ "$raw" == "auto" ]]; then
-    printf '%s\n' "$(detect_current_shell)"
-    return 0
-  fi
-  if [[ "$raw" == "all" ]]; then
-    printf '%s\n' bash zsh fish
-    return 0
-  fi
+  raw="$(to_lower "$raw")"
+
+  case "$raw" in
+    auto)
+      printf '%s\n' "$(detect_current_shell)"
+      return 0
+      ;;
+    all)
+      printf '%s\n' bash zsh fish
+      return 0
+      ;;
+  esac
 
   local item
   local -a out=()
   IFS=',' read -r -a out <<< "$raw"
   for item in "${out[@]}"; do
-    item="$(printf '%s' "$item" | tr '[:upper:]' '[:lower:]')"
+    item="$(to_lower "$item")"
     normalize_shell_name "$item" >/dev/null || die "不支持的 shell：$item"
     [[ "$item" == "auto" || "$item" == "all" ]] && die "auto/all 不能和其他 shell 混用"
     printf '%s\n' "$item"
@@ -161,25 +194,36 @@ install_core() {
   install_file "${script_dir}/to" "${bindir}/to" 755
 }
 
-install_shell_integration() {
+install_shell_wrapper() {
   local sh="$1"
-  case "$sh" in
-    bash)
-      install_file "${script_dir}/to.bash" "$HOME/.to-cd/to.bash" 644
-      ensure_line "$HOME/.bashrc" "$(shell_init_line bash)"
-      ensure_bash_profile_loads_bashrc
-      [[ -f "$HOME/.profile" ]] && ensure_line "$HOME/.profile" "$(shell_init_line bash)"
-      log "[+] 已接入 Bash"
-      ;;
-    zsh)
-      install_file "${script_dir}/to.zsh" "$HOME/.to-cd/to.zsh" 644
-      ensure_line "$HOME/.zshrc" "$(shell_init_line zsh)"
-      log "[+] 已接入 Zsh"
-      ;;
-    fish)
-      install_file "${script_dir}/to.fish" "$HOME/.config/fish/functions/to.fish" 644
-      log "[+] 已接入 Fish"
-      ;;
+  install_file "$(shell_wrapper_source "$sh")" "$(shell_wrapper_dest "$sh")" 644
+}
+
+integrate_bash() {
+  install_shell_wrapper bash
+  ensure_line "$(shell_rc_file bash)" "$(shell_init_line bash)"
+  ensure_bash_profile_loads_bashrc
+  [[ -f "$HOME/.profile" ]] && ensure_line "$HOME/.profile" "$(shell_init_line bash)"
+  log "[+] 已接入 Bash"
+}
+
+integrate_zsh() {
+  install_shell_wrapper zsh
+  ensure_line "$(shell_rc_file zsh)" "$(shell_init_line zsh)"
+  log "[+] 已接入 Zsh"
+}
+
+integrate_fish() {
+  install_shell_wrapper fish
+  log "[+] 已接入 Fish"
+}
+
+install_shell_integration() {
+  case "$1" in
+    bash) integrate_bash ;;
+    zsh)  integrate_zsh ;;
+    fish) integrate_fish ;;
+    *) die "不支持的 shell：$1" ;;
   esac
 }
 
@@ -218,33 +262,16 @@ pm_install() {
   esac
 }
 
-install_deps() {
-  local pm
-  pm="$(detect_pm)"
-  if [[ "$pm" == "none" ]]; then
-    log "[!] 未检测到受支持的包管理器，跳过依赖安装。请手动安装：fzf、plocate 或 fd/fdfind"
-    return 0
-  fi
+install_packages() {
+  local pm="$1"
+  local pkg
+  for pkg in "$@"; do
+    [[ "$pkg" == "$pm" ]] && continue
+    pm_install "$pm" "$pkg"
+  done
+}
 
-  log "[+] 安装依赖，包管理器：$pm"
-  pm_install "$pm" fzf
-  case "$pm" in
-    apt|dnf|zypper|pacman)
-      pm_install "$pm" plocate
-      pm_install "$pm" mlocate
-      pm_install "$pm" fd
-      pm_install "$pm" fd-find
-      ;;
-    apk)
-      pm_install "$pm" plocate
-      pm_install "$pm" mlocate
-      pm_install "$pm" fd
-      ;;
-    brew)
-      pm_install "$pm" fd
-      ;;
-  esac
-
+print_dependency_status() {
   log "[i] 当前依赖状态："
   local c
   for c in plocate mlocate fd fdfind fzf; do
@@ -254,13 +281,40 @@ install_deps() {
       log "    - $c: 未安装"
     fi
   done
+}
 
+run_updatedb_if_needed() {
   if (( skip_updatedb == 0 )) && have_cmd updatedb; then
     log "[+] 运行 updatedb"
     $SUDO updatedb || true
   else
     log "[i] 跳过 updatedb 或系统无 updatedb"
   fi
+}
+
+install_deps() {
+  local pm
+  pm="$(detect_pm)"
+  if [[ "$pm" == "none" ]]; then
+    log "[!] 未检测到受支持的包管理器，跳过依赖安装。请手动安装：fzf、plocate 或 fd/fdfind"
+    return 0
+  fi
+
+  log "[+] 安装依赖，包管理器：$pm"
+  case "$pm" in
+    apt|dnf|zypper|pacman)
+      install_packages "$pm" fzf plocate mlocate fd fd-find
+      ;;
+    apk)
+      install_packages "$pm" fzf plocate mlocate fd
+      ;;
+    brew)
+      install_packages "$pm" fzf fd
+      ;;
+  esac
+
+  print_dependency_status
+  run_updatedb_if_needed
 }
 
 print_reload_hint() {
@@ -276,19 +330,24 @@ print_reload_hint() {
   done
 }
 
+print_init() {
+  local sh
+  sh="$(to_lower "$1")"
+  normalize_shell_name "$sh" >/dev/null || die "不支持的 shell：$sh"
+  [[ "$sh" == "auto" || "$sh" == "all" ]] && die "--print-init 只支持 bash|zsh|fish"
+  shell_init_line "$sh"
+}
+
 main() {
   parse_args "$@"
 
   if (( print_init_only == 1 )); then
-    selected_shells="$(printf '%s' "$selected_shells" | tr '[:upper:]' '[:lower:]')"
-    normalize_shell_name "$selected_shells" >/dev/null || die "不支持的 shell：$selected_shells"
-    [[ "$selected_shells" == "auto" || "$selected_shells" == "all" ]] && die "--print-init 只支持 bash|zsh|fish"
-    shell_init_line "$selected_shells"
+    print_init "$selected_shells"
     exit 0
   fi
 
   local shells
-  shells="$(resolve_shells "$(printf '%s' "$selected_shells" | tr '[:upper:]' '[:lower:]')")"
+  shells="$(resolve_shells "$selected_shells")"
 
   install_core
 

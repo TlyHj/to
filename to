@@ -4,10 +4,13 @@ set -euo pipefail
 
 CACHE_FILE="${HOME}/.to_recent_dirs"
 MAX_CACHE="${TO_MAX_CACHE:-20}"
+SEARCH_MAX_DEPTH="${TO_SEARCH_MAX_DEPTH:-6}"
+SEARCH_ROOTS_RAW="${TO_SEARCH_ROOTS:-$HOME /opt /srv /usr/local /var/www}"
+SEARCH_EXCLUDES_RAW="${TO_SEARCH_EXCLUDES:-/proc /sys /dev /run /tmp /mnt /media /var/tmp /snap}"
 
 matches=()
 
-die() { printf '%s\n' "$*" >&2; exit 1; }
+_die() { printf '%s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
@@ -18,6 +21,12 @@ usage() {
   to -c               清空缓存
   to -r <PATH>        从缓存中移除指定路径
   to -h, --help       显示帮助
+
+环境变量:
+  TO_MAX_CACHE          最近目录缓存条数，默认 20
+  TO_SEARCH_MAX_DEPTH   fd/find 搜索深度，默认 6
+  TO_SEARCH_ROOTS       搜索根目录列表，空格分隔
+  TO_SEARCH_EXCLUDES    搜索排除目录列表，空格分隔
 EOF
 }
 
@@ -73,7 +82,7 @@ clear_cache() {
 remove_cache_entry() {
   local path="$1" abs tmp
   ensure_cache_file
-  abs="$(abs_path "$path")" || die "路径不存在：$path"
+  abs="$(abs_path "$path")" || _die "路径不存在：$path"
   tmp="$(mktemp "${CACHE_FILE}.XXXX")"
   grep -F -x -v -- "$abs" "$CACHE_FILE" > "$tmp" || true
   mv "$tmp" "$CACHE_FILE"
@@ -83,23 +92,128 @@ remove_cache_entry() {
 search_recent() {
   local q="$1"
   [[ -f "$CACHE_FILE" ]] || return 0
-  grep -i -F -- "$q" "$CACHE_FILE" || true
+  tac "$CACHE_FILE" 2>/dev/null | grep -i -F -- "$q" || grep -i -F -- "$q" "$CACHE_FILE" || true
+}
+
+get_search_roots() {
+  local root
+  for root in $SEARCH_ROOTS_RAW; do
+    [[ -d "$root" ]] && printf '%s\n' "$root"
+  done
+}
+
+path_is_within_search_root() {
+  local path="$1" root
+  for root in $SEARCH_ROOTS_RAW; do
+    [[ -d "$root" ]] || continue
+    [[ "$path" == "$root" || "$path" == "$root"/* ]] && return 0
+  done
+  return 1
+}
+
+is_excluded_path() {
+  local path="$1" ex
+  path_is_within_search_root "$path" && return 1
+  for ex in $SEARCH_EXCLUDES_RAW; do
+    [[ "$path" == "$ex" || "$path" == "$ex"/* ]] && return 0
+  done
+  return 1
 }
 
 search_plocate() {
+  local q="$1" p
+  command -v plocate >/dev/null 2>&1 || return 0
+  plocate -i -b -0 -- "$q" | while IFS= read -r -d '' p; do
+    [[ -d "$p" ]] || continue
+    is_excluded_path "$p" && continue
+    printf '%s\n' "$p"
+  done
+}
+
+should_apply_exclude() {
+  local root="$1" ex="$2"
+  [[ -n "$ex" ]] || return 1
+  [[ "$root" == "$ex" || "$root" == "$ex"/* ]] && return 1
+  return 0
+}
+
+search_fd_like() {
+  local cmd="$1" q="$2" root
+  command -v "$cmd" >/dev/null 2>&1 || return 0
+  while IFS= read -r root; do
+    "$cmd" -t d -i -a --max-depth "$SEARCH_MAX_DEPTH" "$q" "$root" 2>/dev/null || true
+  done < <(get_search_roots)
+}
+
+search_find() {
+  local q="$1" root ex_args=() ex
+  while IFS= read -r root; do
+    ex_args=()
+    for ex in $SEARCH_EXCLUDES_RAW; do
+      if should_apply_exclude "$root" "$ex"; then
+        ex_args+=( -not -path "$ex" -not -path "$ex/*" )
+      fi
+    done
+    find "$root" -maxdepth "$SEARCH_MAX_DEPTH" -type d -iname "*$q*" "${ex_args[@]}" 2>/dev/null || true
+  done < <(get_search_roots)
+}
+
+search_system() {
   local q="$1"
   if command -v plocate >/dev/null 2>&1; then
-    plocate -i -b -0 -- "$q" | \
-    while IFS= read -r -d '' p; do
-      [[ -d "$p" ]] && printf '%s\n' "$p"
-    done
-  elif command -v fd >/dev/null 2>&1; then
-    fd -t d -i -u -a "$q" / 2>/dev/null || true
-  elif command -v fdfind >/dev/null 2>&1; then
-    fdfind -t d -i -u -a "$q" / 2>/dev/null || true
-  else
-    find / -type d -iname "*$q*" 2>/dev/null || true
+    search_plocate "$q"
   fi
+
+  if command -v fd >/dev/null 2>&1; then
+    search_fd_like fd "$q"
+  elif command -v fdfind >/dev/null 2>&1; then
+    search_fd_like fdfind "$q"
+  else
+    search_find "$q"
+  fi
+}
+
+score_match() {
+  local q_lower="$1" path="$2"
+  python3 - "$q_lower" "$path" <<'PY'
+import os, sys
+q = sys.argv[1].lower()
+path = sys.argv[2]
+base = os.path.basename(path).lower()
+path_lower = path.lower()
+score = 0
+
+if base == q:
+    score += 1000
+elif base.startswith(q):
+    score += 700
+elif q in base:
+    score += 500
+elif q in path_lower:
+    score += 250
+
+home = os.path.expanduser('~')
+if path == home or path.startswith(home + os.sep):
+    score += 180
+if '/src/' in path_lower or '/code/' in path_lower or '/projects/' in path_lower:
+    score += 80
+
+parts = [p for p in path.split(os.sep) if p]
+score -= min(len(parts), 20) * 8
+score -= min(len(path), 240)
+print(score)
+PY
+}
+
+sort_matches() {
+  local q="$1" q_lower
+  q_lower="$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')"
+  local path score
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    score="$(score_match "$q_lower" "$path")"
+    printf '%s\t%s\n' "$score" "$path"
+  done | sort -t $'\t' -k1,1nr -k2,2 | cut -f2-
 }
 
 collect_matches() {
@@ -108,11 +222,13 @@ collect_matches() {
   matches=()
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
+    [[ -d "$line" ]] || continue
+    is_excluded_path "$line" && continue
     if [[ -z "${seen[$line]+x}" ]]; then
       seen["$line"]=1
       matches+=("$line")
     fi
-  done < <({ search_recent "$q"; search_plocate "$q"; })
+  done < <({ search_recent "$q"; search_system "$q"; } | sort_matches "$q")
 }
 
 pick_match() {
@@ -164,7 +280,7 @@ main() {
       exit 0
       ;;
     -r|--remove)
-      [[ $# -ge 2 ]] || die "用法: to -r <PATH>"
+      [[ $# -ge 2 ]] || _die "用法: to -r <PATH>"
       remove_cache_entry "$2"
       exit 0
       ;;
@@ -173,7 +289,7 @@ main() {
   local q="$1"
   if [[ -d "$q" ]]; then
     local direct
-    direct="$(abs_path "$q")" || die "无法解析目录：$q"
+    direct="$(abs_path "$q")" || _die "无法解析目录：$q"
     update_cache "$direct"
     printf '%s\n' "$direct"
     exit 0
@@ -181,7 +297,7 @@ main() {
 
   collect_matches "$q"
   if [[ ${#matches[@]} -eq 0 ]]; then
-    die "未找到匹配目录：$q"
+    _die "未找到匹配目录：$q"
   fi
 
   local dir
