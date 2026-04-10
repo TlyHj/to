@@ -1,164 +1,276 @@
 # to
 
-一个Linux下快速跳转目录的小工具：结合“最近访问缓存”与 plocate/fd/find 搜索，支持交互选择（优先用 fzf），在常见 Shell 中提供 `到` 命令完成目录切换。
+一个 Linux 下快速跳转目录的小工具：结合“最近访问缓存”与 `plocate` / `fd` / `find` 搜索，支持交互选择（优先用 `fzf`），在常见 Shell 中提供统一的 `to` 目录跳转体验。
 
-- 支持的 Shell：Zsh、Bash、Fish（通过各自的包装函数）
-- 核心可执行文件：`到`（只输出选中目录路径），由包装函数执行 `cd`
+- 支持的 Shell：Zsh、Bash、Fish
+- 核心可执行文件：`to`（只输出选中目录路径），由 shell 包装函数执行 `cd`
+- 安装入口：统一使用 `install.sh`
+- 卸载入口：统一使用 `uninstall.sh`
+
+## 这次重构解决了什么
+
+之前安装方式对不同终端不够统一：
+- Bash / Zsh / Fish 的接入方式分散
+- 用户需要理解不同 shell 的配置文件差异
+- 安装脚本职责太多、路径也不够统一
+
+现在改成：
+- **统一入口：安装跑 `install.sh`，卸载跑 `uninstall.sh`**
+- **默认自动识别当前 shell** 并完成接入
+- 也支持一次接入多个 shell
+- 支持仅打印初始化片段，方便手动安装或二次集成
+- 包装函数与安装器解耦，后续维护更直接
 
 ## 特性
 - 最近目录缓存（`~/.to_recent_dirs`），命中优先
 - 多后端搜索：`plocate` / `fd (fdfind)` / `find`，自动兜底
-- 交互筛选：安装 `fzf` 时提供模糊筛选界面（可在界面继续输入过滤）
+- 搜索默认优先用户常用目录，避免直接粗暴扫整个 `/`
+- 默认排除 `/proc`、`/sys`、`/dev`、`/run`、`/tmp` 等无意义目录
+- 命中结果会按 basename 精确度、是否位于用户目录、路径长度做排序
+- 交互筛选：安装 `fzf` 时提供模糊筛选界面
 - 路径安全：正确处理空格/特殊字符
-- 多 Shell 支持：Zsh、Bash、Fish 都可用
+- 多 Shell 支持：Zsh、Bash、Fish
+- 内置缓存管理：支持列出 / 清空 / 删除缓存项
+- 直接路径跳转：`to ../project`、`to ~/code/demo`
+- 包装函数支持 `TO_BIN` 覆盖核心可执行文件路径
+- 安装 / 卸载支持多 shell 统一管理
 
 ## 依赖
-- 必需：任一 Shell（Zsh/Bash/Fish）；核心 `到` 无其他硬性依赖
+- 必需：任一 Shell（Zsh/Bash/Fish）
 - 可选（推荐）：
-  - `plocate`（极速，需定期 `updatedb`）
-  - `fd` 或 `fdfind`（更快的文件查找）
-  - `fzf`（更好用的交互选择）
-
-提示：
-- 使用 `plocate` 时，首次使用或新增大量目录后建议更新索引：
-  ```bash
-  sudo updatedb
-  ```
+  - `plocate`
+  - `fd` 或 `fdfind`
+  - `fzf`
 
 ## 安装
-### 一键安装（推荐）
-在仓库根目录执行：
+
+### 1）默认安装（推荐）
+
+直接执行：
+
 ```bash
-# 系统安装（安装到 /usr/local/bin，需要 sudo）
 sudo ./install.sh
-
-# 或者仅为当前用户安装（确保 ~/.local/bin 在 PATH 中）
-PREFIX="$HOME/.local" ./install.sh
 ```
 
-高级选项：
+行为：
+- 安装核心程序到 `/usr/local/bin/to`
+- 自动识别当前 shell
+- 自动把对应 shell 的初始化接入写入配置文件
+- 自动尝试安装依赖
+
+### 2）安装到当前用户目录
+
 ```bash
-SKIP_DEPS=1 ./install.sh        # 跳过自动安装 fzf 与搜索后端
-SKIP_UPDATEDB=1 ./install.sh    # 安装依赖但跳过执行 updatedb
-PREFIX="$HOME/.local" ./install.sh  # 安装到用户目录（无需 sudo）
+./install.sh --prefix "$HOME/.local"
 ```
 
-安装脚本会：
-- 安装核心 `to` 到 `$PREFIX/bin/to`（默认 `/usr/local/bin/to`）
-- 安装并接入各 Shell 包装：
-  - Zsh：将 `to.zsh` 安装到 `~/.to-cd/to.zsh` 并写入 `~/.zshrc` 的 `source` 行
-  - Bash：将 `to.bash` 安装到 `~/.to-cd/to.bash` 并写入 `~/.bashrc` 的 `source` 行（并确保登录 shell 也加载）
-  - Fish：将 `to.fish` 安装到 `~/.config/fish/functions/to.fish`
-- 自动安装依赖（默认开启，可被 SKIP_DEPS 关闭）：
-  - 优先安装 plocate；若不可用则尝试 mlocate、fd/fdfind（在 macOS 使用 Homebrew 安装 fd/fzf）
-  - 若系统存在 `updatedb`，会自动执行一次（可被 SKIP_UPDATEDB 关闭）
+适合不想写入 `/usr/local/bin` 的情况。
 
-完成后，重载对应 Shell：
+### 3）一次接入多个 shell
+
 ```bash
-# Zsh
-source ~/.zshrc   # 或 exec zsh
-
-# Bash
-source ~/.bashrc  # 或 exec bash
-
-# Fish
-exec fish
+./install.sh --shell bash,zsh
+./install.sh --shell all
 ```
 
+### 4）跳过依赖安装
 
-### 手动安装（可选）
-把核心可执行文件放到 PATH（如 `/usr/local/bin`），再添加对应的包装函数。
+```bash
+./install.sh --skip-deps
+./install.sh --skip-deps --skip-updatedb
+```
 
-- Zsh（加入到 `~/.zshrc`）：
-  ```bash
-  to() {
-    local dir
-    dir=$(/usr/local/bin/to "$@") || return
-    builtin cd -- "$dir"
-  }
-  ```
+### 5）只打印初始化片段，不执行安装
 
-- Bash（加入到 `~/.bashrc` 或 `~/.profile`）：
-  ```bash
-  to() {
-    local dir
-    dir=$(/usr/local/bin/to "$@") || return
-    builtin cd -- "$dir"
-  }
-  ```
+```bash
+./install.sh --print-init bash
+./install.sh --print-init zsh
+./install.sh --print-init fish
+```
 
-- Fish（保存为 `~/.config/fish/functions/to.fish`）：
-  ```fish
-  function to
-    set -l dir (command /usr/local/bin/to $argv)
-    if test $status -ne 0
-      return
-    end
-    cd -- $dir
-  end
-  ```
+适合：
+- 手动集成
+- dotfiles 管理
+- 自定义安装流程
+
+## 卸载
+
+### 1）默认卸载
+
+```bash
+./uninstall.sh
+```
+
+行为：
+- 删除核心可执行文件
+- 删除 Bash / Zsh / Fish 的接入包装文件
+- 清理对应 shell 配置中的接入行
+- 默认保留缓存文件 `~/.to_recent_dirs`
+
+### 2）卸载指定安装前缀
+
+```bash
+./uninstall.sh --prefix "$HOME/.local"
+```
+
+### 3）只卸载部分 shell 接入
+
+```bash
+./uninstall.sh --shell bash
+./uninstall.sh --shell zsh,fish
+```
+
+### 4）连缓存一起删掉
+
+```bash
+./uninstall.sh --remove-cache
+```
+
+## 命令行参数
+
+### install.sh
+
+```bash
+./install.sh --prefix <PATH>
+./install.sh --shell <auto|bash|zsh|fish|all>
+./install.sh --skip-deps
+./install.sh --skip-updatedb
+./install.sh --print-init <bash|zsh|fish>
+```
+
+### uninstall.sh
+
+```bash
+./uninstall.sh --prefix <PATH>
+./uninstall.sh --shell <bash|zsh|fish|all>
+./uninstall.sh --remove-cache
+```
 
 ## 使用
+
 ```bash
-to proj   # 跳转到名称包含 proj 的目录（缓存优先）
-to fscan  # 只有一个结果时直接进入（若安装 fzf 并强制交互版本，会进入筛选界面）
-to cve    # 多个结果时进入交互选择；安装 fzf 会使用 fzf 界面
+to proj
+to ../my-project
+to ~/code/demo
 ```
 
-- 若使用了 `plocate`，新建或移动大量目录后，建议运行一次：
-  ```bash
-  sudo updatedb
-  ```
+## 缓存管理
 
-## 配置与文件
-- 缓存文件：`~/.to_recent_dirs`
-  - 默认保留最近 20 条，可在核心脚本 `到` 中修改 `MAX_CACHE`
-- 安装位置：
-  - 可执行文件：`/usr/local/bin/to`（或 `$HOME/.local/bin/to`）
-  - 包装函数：`~/.to-cd/to.{zsh,bash}`、`~/.config/fish/functions/to.fish`
+```bash
+to -l
+to -c
+to -r ~/code/demo
+```
 
-## 缓存相关
-- 查看缓存：
-  ```bash
-  cat -n ~/.to_recent_dirs
-  ```
-- 清空缓存（当前用户）：
-  ```bash
-  rm -f ~/.to_recent_dirs
-  ```
-- 仅删除某一条（示例：移除 ~/tools/fscan）：
-  ```bash
-  grep -F -x -v -- "$HOME/tools/fscan" "$HOME/.to_recent_dirs" > "$HOME/.to_recent_dirs.tmp" \
-    && mv "$HOME/.to_recent_dirs.tmp" "$HOME/.to_recent_dirs"
-  ```
-- 注意：若在 root 会话中使用过 `到`，root 有独立缓存 `/root/.to_recent_dirs`
+## 环境变量
 
-（如果你采用了带内置缓存管理的脚本版本，还可使用：`to -l` 列出、`to -c` 清空、`to -r <PATH>` 移除）
+```bash
+export TO_MAX_CACHE=50
+export TO_BIN="$HOME/.local/bin/to"
+export TO_SEARCH_MAX_DEPTH=6
+export TO_SEARCH_ROOTS="$HOME /opt /srv /usr/local /var/www"
+export TO_SEARCH_EXCLUDES="/proc /sys /dev /run /tmp /mnt /media /var/tmp /snap"
+```
+
+## 工作方式
+- 若参数本身就是已存在目录：直接输出该目录绝对路径并写入缓存
+- 否则先查最近缓存，再查系统搜索结果
+- 系统搜索优先走 `plocate`
+- 若没有合适结果，再走 `fd` / `fdfind` / `find`
+- `fd/find` 默认只扫常用根目录，不直接粗扫整个根文件系统
+- 命中结果会优先考虑：
+  - basename 精确命中
+  - basename 前缀命中
+  - 用户目录下的结果
+  - 更短、更浅的路径
+- 命中 1 个结果时直接输出
+- 命中多个结果时：
+  - 有 `fzf`：进入模糊选择
+  - 无 `fzf`：进入数字菜单
+
+## 为什么需要 shell 包装
+
+`cd` 是 shell 内建命令，外部可执行文件不能直接修改你当前终端的工作目录。
+所以这里拆成两层：
+
+1. 核心程序 `to`
+   - 只负责找目录
+   - 只向标准输出打印最终目录路径
+2. shell 包装函数
+   - 调用核心程序
+   - 读取输出结果
+   - 在当前 shell 里执行 `cd`
+
+这也是为什么安装时除了放置可执行文件，还需要把包装函数接入 Bash / Zsh / Fish。
+
+## 安装后接入位置
+- Bash：`~/.bashrc`
+- Zsh：`~/.zshrc`
+- Fish：`~/.config/fish/functions/to.fish`
+
+包装文件位置：
+- `~/.to-cd/to.bash`
+- `~/.to-cd/to.zsh`
+- `~/.config/fish/functions/to.fish`
+
+## 常见场景
+
+### 安装到用户目录并手动接入
+
+```bash
+./install.sh --prefix "$HOME/.local" --skip-deps
+./install.sh --print-init zsh
+```
+
+然后把输出的初始化片段写入你自己的 shell 配置。
+
+### 只想给 Bash 和 Zsh 接入
+
+```bash
+./install.sh --shell bash,zsh
+```
+
+### 自定义搜索范围
+
+```bash
+export TO_SEARCH_ROOTS="$HOME ~/work /srv/projects"
+export TO_SEARCH_MAX_DEPTH=5
+```
+
+### 重装
+
+```bash
+./uninstall.sh
+./install.sh
+```
 
 ## 故障排查
-- 修改了 Shell 配置未生效？
-  - 运行 `source ~/.zshrc` 或 `source ~/.bashrc`，Fish 执行 `exec fish`
-- 确认函数是否生效：
-  ```bash
-  type -a to     # Zsh/Bash 期望第一行是 “to is a shell function”
-  ```
-- 核心脚本能否找到目录？
-  ```bash
-  /usr/local/bin/to keyword
-  ```
-- plocate 找不到新目录？
-  ```bash
-  sudo updatedb
-  plocate -i -b keyword | head
-  ```
-- 仍未命中？
-  - 检查目录是否在 `updatedb.conf` 的 PRUNEPATHS/PRUNEFS 中被排除
-  - 或安装 `fd/fdfind`，让工具在索引缺失时也能回退搜索
 
-## 许可证与反馈
-- 许可证：MIT
-- 这是一个简陋的小工具，如果你有更好的建议或者方案，可以通过下面的方式来联系：
-  ```
-  1435900886@qq.com
-  ```
-  感谢您的反馈！！！
+查看当前 `to` 是否已生效：
+
+```bash
+type -a to
+```
+
+查看安装脚本帮助：
+
+```bash
+./install.sh --help
+./uninstall.sh --help
+```
+
+单独测试核心脚本：
+
+```bash
+to --help
+/usr/local/bin/to keyword
+```
+
+`plocate` 没更新时：
+
+```bash
+sudo updatedb
+```
+
+## 许可证
+- MIT

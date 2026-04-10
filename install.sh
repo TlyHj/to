@@ -1,42 +1,242 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 说明：
-# - 默认自动安装依赖（fzf + plocate 或 fd/fdfind），并在可用时执行 updatedb
-# - 可通过 SKIP_DEPS=1 跳过依赖安装；通过 SKIP_UPDATEDB=1 跳过 updatedb
-# - 支持自定义 PREFIX（默认 /usr/local）
-#
-# 例子：
-#   ./install.sh                           # 默认自动装依赖（可能需要 sudo）
-#   SKIP_DEPS=1 ./install.sh               # 跳过依赖安装
-#   PREFIX="$HOME/.local" ./install.sh     # 安装到用户目录（一般无需 sudo）
-
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 prefix="${PREFIX:-/usr/local}"
 bindir="${prefix}/bin"
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 skip_deps="${SKIP_DEPS:-0}"
 skip_updatedb="${SKIP_UPDATEDB:-0}"
+selected_shells="auto"
+print_init_only=0
 
-# 选择是否使用 sudo
 SUDO="sudo"
 if [ "${EUID:-$(id -u)}" -eq 0 ]; then
   SUDO=""
 fi
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
+log() { printf '%s\n' "$*"; }
+die() { printf '%s\n' "$*" >&2; exit 1; }
 
-# 检测包管理器
+to_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+usage() {
+  cat <<'EOF'
+统一安装脚本
+
+用法：
+  ./install.sh [选项]
+
+选项：
+  --prefix <PATH>         安装前缀，默认 /usr/local
+  --shell <LIST>          指定接入哪些 shell
+                          可选：auto|bash|zsh|fish|all
+                          多个 shell 用逗号分隔，如：bash,zsh
+  --skip-deps             跳过依赖安装
+  --skip-updatedb         跳过 updatedb
+  --print-init <shell>    仅打印对应 shell 的初始化片段，不执行安装
+  -h, --help              显示帮助
+
+示例：
+  ./install.sh
+  ./install.sh --prefix "$HOME/.local"
+  ./install.sh --shell bash,zsh
+  ./install.sh --shell all --skip-deps
+  ./install.sh --print-init zsh
+EOF
+}
+
+normalize_shell_name() {
+  case "$1" in
+    bash|zsh|fish|auto|all) printf '%s\n' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+detect_current_shell() {
+  local sh="${SHELL##*/}"
+  sh="$(to_lower "$sh")"
+  case "$sh" in
+    bash|zsh|fish) printf '%s\n' "$sh" ;;
+    *) printf '%s\n' bash ;;
+  esac
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --prefix)
+        [[ $# -ge 2 ]] || die "--prefix 需要参数"
+        prefix="$2"
+        bindir="${prefix}/bin"
+        shift 2
+        ;;
+      --shell)
+        [[ $# -ge 2 ]] || die "--shell 需要参数"
+        selected_shells="$2"
+        shift 2
+        ;;
+      --skip-deps)
+        skip_deps=1
+        shift
+        ;;
+      --skip-updatedb)
+        skip_updatedb=1
+        shift
+        ;;
+      --print-init)
+        [[ $# -ge 2 ]] || die "--print-init 需要参数"
+        print_init_only=1
+        selected_shells="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "未知参数：$1"
+        ;;
+    esac
+  done
+}
+
+shell_init_line() {
+  case "$1" in
+    bash) printf '%s\n' '[ -r "$HOME/.to-cd/to.bash" ] && . "$HOME/.to-cd/to.bash"' ;;
+    zsh)  printf '%s\n' '[ -r "$HOME/.to-cd/to.zsh" ] && source "$HOME/.to-cd/to.zsh"' ;;
+    fish) printf '%s\n' '# fish 自动加载 ~/.config/fish/functions/to.fish，无需额外 init' ;;
+    *) return 1 ;;
+  esac
+}
+
+shell_wrapper_source() {
+  case "$1" in
+    bash) printf '%s\n' "${script_dir}/to.bash" ;;
+    zsh)  printf '%s\n' "${script_dir}/to.zsh" ;;
+    fish) printf '%s\n' "${script_dir}/to.fish" ;;
+    *) return 1 ;;
+  esac
+}
+
+shell_wrapper_dest() {
+  case "$1" in
+    bash) printf '%s\n' "$HOME/.to-cd/to.bash" ;;
+    zsh)  printf '%s\n' "$HOME/.to-cd/to.zsh" ;;
+    fish) printf '%s\n' "$HOME/.config/fish/functions/to.fish" ;;
+    *) return 1 ;;
+  esac
+}
+
+shell_rc_file() {
+  case "$1" in
+    bash) printf '%s\n' "$HOME/.bashrc" ;;
+    zsh)  printf '%s\n' "$HOME/.zshrc" ;;
+    *) return 1 ;;
+  esac
+}
+
+resolve_shells() {
+  local raw="$1"
+  raw="$(to_lower "$raw")"
+
+  case "$raw" in
+    auto)
+      printf '%s\n' "$(detect_current_shell)"
+      return 0
+      ;;
+    all)
+      printf '%s\n' bash zsh fish
+      return 0
+      ;;
+  esac
+
+  local item
+  local -a out=()
+  IFS=',' read -r -a out <<< "$raw"
+  for item in "${out[@]}"; do
+    item="$(to_lower "$item")"
+    normalize_shell_name "$item" >/dev/null || die "不支持的 shell：$item"
+    [[ "$item" == "auto" || "$item" == "all" ]] && die "auto/all 不能和其他 shell 混用"
+    printf '%s\n' "$item"
+  done
+}
+
+ensure_line() {
+  local file="$1" line="$2"
+  mkdir -p "$(dirname "$file")"
+  touch "$file"
+  grep -Fqx "$line" "$file" 2>/dev/null || printf '\n%s\n' "$line" >> "$file"
+}
+
+ensure_bash_profile_loads_bashrc() {
+  local profile="$HOME/.bash_profile"
+  if [[ ! -f "$profile" ]] || ! grep -Eq '(\.|source) +~\/\.bashrc' "$profile" 2>/dev/null; then
+    {
+      echo ''
+      echo '# Load ~/.bashrc for login shells'
+      echo 'if [ -f ~/.bashrc ]; then . ~/.bashrc; fi'
+    } >> "$profile"
+  fi
+}
+
+install_file() {
+  local src="$1" dest="$2" mode="${3:-755}"
+  if mkdir -p "$(dirname "$dest")" 2>/dev/null; then
+    install -Dm"$mode" "$src" "$dest"
+  else
+    $SUDO install -Dm"$mode" "$src" "$dest"
+  fi
+}
+
+install_core() {
+  log "[+] 安装核心可执行文件到 ${bindir}/to"
+  install_file "${script_dir}/to" "${bindir}/to" 755
+}
+
+install_shell_wrapper() {
+  local sh="$1"
+  install_file "$(shell_wrapper_source "$sh")" "$(shell_wrapper_dest "$sh")" 644
+}
+
+integrate_bash() {
+  install_shell_wrapper bash
+  ensure_line "$(shell_rc_file bash)" "$(shell_init_line bash)"
+  ensure_bash_profile_loads_bashrc
+  [[ -f "$HOME/.profile" ]] && ensure_line "$HOME/.profile" "$(shell_init_line bash)"
+  log "[+] 已接入 Bash"
+}
+
+integrate_zsh() {
+  install_shell_wrapper zsh
+  ensure_line "$(shell_rc_file zsh)" "$(shell_init_line zsh)"
+  log "[+] 已接入 Zsh"
+}
+
+integrate_fish() {
+  install_shell_wrapper fish
+  log "[+] 已接入 Fish"
+}
+
+install_shell_integration() {
+  case "$1" in
+    bash) integrate_bash ;;
+    zsh)  integrate_zsh ;;
+    fish) integrate_fish ;;
+    *) die "不支持的 shell：$1" ;;
+  esac
+}
+
 detect_pm() {
   if have_cmd apt-get; then echo apt; return; fi
-  if have_cmd pacman;  then echo pacman; return; fi
-  if have_cmd dnf;     then echo dnf; return; fi
-  if have_cmd zypper;  then echo zypper; return; fi
-  if have_cmd apk;     then echo apk; return; fi
-  if have_cmd brew;    then echo brew; return; fi
+  if have_cmd pacman; then echo pacman; return; fi
+  if have_cmd dnf; then echo dnf; return; fi
+  if have_cmd zypper; then echo zypper; return; fi
+  if have_cmd apk; then echo apk; return; fi
+  if have_cmd brew; then echo brew; return; fi
   echo none
 }
 
-# 安装一个包（允许失败，不阻断流程）
 pm_install() {
   local pm="$1" pkg="$2"
   case "$pm" in
@@ -59,136 +259,110 @@ pm_install() {
     brew)
       brew install "$pkg" || true
       ;;
-    *)
-      return 1
-      ;;
   esac
+}
+
+install_packages() {
+  local pm="$1"
+  local pkg
+  for pkg in "$@"; do
+    [[ "$pkg" == "$pm" ]] && continue
+    pm_install "$pm" "$pkg"
+  done
+}
+
+print_dependency_status() {
+  log "[i] 当前依赖状态："
+  local c
+  for c in plocate mlocate fd fdfind fzf; do
+    if have_cmd "$c"; then
+      log "    - $c: OK ($(command -v "$c"))"
+    else
+      log "    - $c: 未安装"
+    fi
+  done
+}
+
+run_updatedb_if_needed() {
+  if (( skip_updatedb == 0 )) && have_cmd updatedb; then
+    log "[+] 运行 updatedb"
+    $SUDO updatedb || true
+  else
+    log "[i] 跳过 updatedb 或系统无 updatedb"
+  fi
 }
 
 install_deps() {
-  local pm; pm="$(detect_pm)"
+  local pm
+  pm="$(detect_pm)"
   if [[ "$pm" == "none" ]]; then
-    echo "[!] 未检测到受支持的包管理器，跳过自动安装依赖。请手动安装：fzf、plocate 或 fd/fdfind"
+    log "[!] 未检测到受支持的包管理器，跳过依赖安装。请手动安装：fzf、plocate 或 fd/fdfind"
     return 0
   fi
 
-  echo "[+] 使用包管理器安装依赖: $pm"
-  echo "[+] 尝试安装 fzf ..."
-  pm_install "$pm" "fzf"
-
-  echo "[+] 尝试安装搜索后端（优先 plocate，其次 fd/fdfind）..."
+  log "[+] 安装依赖，包管理器：$pm"
   case "$pm" in
     apt|dnf|zypper|pacman)
-      pm_install "$pm" "plocate"
-      pm_install "$pm" "mlocate"   # 某些发行版只有 mlocate
-      pm_install "$pm" "fd"        # Arch/openSUSE 通常叫 fd
-      pm_install "$pm" "fd-find"   # Debian/Ubuntu/Fedora 通常叫 fd-find（命令叫 fdfind）
+      install_packages "$pm" fzf plocate mlocate fd fd-find
       ;;
     apk)
-      pm_install "$pm" "plocate"
-      pm_install "$pm" "mlocate"
-      pm_install "$pm" "fd"
+      install_packages "$pm" fzf plocate mlocate fd
       ;;
     brew)
-      # macOS 没有 plocate，安装 fd + fzf
-      pm_install "$pm" "fd"
+      install_packages "$pm" fzf fd
       ;;
   esac
 
-  echo "[i] 依赖安装结果："
-  for c in plocate mlocate fd fdfind fzf; do
-    if have_cmd "$c"; then
-      echo "    - $c: OK ($(command -v "$c"))"
-    else
-      echo "    - $c: 未安装"
-    fi
-  done
-
-  if (( skip_updatedb == 0 )) && have_cmd updatedb; then
-    echo "[+] 运行 updatedb（可能需要一些时间）"
-    $SUDO updatedb || true
-  else
-    echo "[i] 跳过 updatedb 或系统无 updatedb"
-  fi
+  print_dependency_status
+  run_updatedb_if_needed
 }
 
-# ---------- 安装核心可执行文件 ----------
-echo "[+] 安装核心可执行文件到 ${bindir}/to"
-# 尝试无 sudo 创建 bindir；失败则用 sudo
-if mkdir -p "$bindir" 2>/dev/null; then
-  install -Dm755 "${script_dir}/to" "${bindir}/to"
-else
-  $SUDO install -Dm755 "${script_dir}/to" "${bindir}/to"
-fi
+print_reload_hint() {
+  local shells="$1"
+  log "[✓] 安装完成"
+  local sh
+  for sh in $shells; do
+    case "$sh" in
+      bash) log "  Bash: source ~/.bashrc  或  exec bash" ;;
+      zsh)  log "  Zsh:  source ~/.zshrc   或  exec zsh" ;;
+      fish) log "  Fish: exec fish" ;;
+    esac
+  done
+}
 
-# ---------- 可选：安装依赖 ----------
-if (( skip_deps == 0 )); then
-  install_deps
-else
-  echo "[i] 已按 SKIP_DEPS=1 跳过依赖安装"
-fi
+print_init() {
+  local sh
+  sh="$(to_lower "$1")"
+  normalize_shell_name "$sh" >/dev/null || die "不支持的 shell：$sh"
+  [[ "$sh" == "auto" || "$sh" == "all" ]] && die "--print-init 只支持 bash|zsh|fish"
+  shell_init_line "$sh"
+}
 
-# ---------- Zsh 包装 ----------
-if [[ -f "${script_dir}/to.zsh" ]]; then
-  dest_dir="${HOME}/.to-cd"
-  dest_file="${dest_dir}/to.zsh"
-  mkdir -p "${dest_dir}"
-  install -Dm644 "${script_dir}/to.zsh" "${dest_file}"
+main() {
+  parse_args "$@"
 
-  source_line_zsh='source "$HOME/.to-cd/to.zsh"'
-  if ! grep -Fqx "$source_line_zsh" "${HOME}/.zshrc" 2>/dev/null; then
-    # 兼容旧路径替换
-    if grep -Fq 'source "$HOME/.to-cd/shell/to.zsh"' "${HOME}/.zshrc" 2>/dev/null; then
-      sed -i 's|source "$HOME/.to-cd/shell/to.zsh"|source "$HOME/.to-cd/to.zsh"|' "${HOME}/.zshrc"
-      echo "[i] 已更新 ~/.zshrc 中旧的 source 路径"
-    else
-      printf '\n%s\n' "$source_line_zsh" >> "${HOME}/.zshrc"
-      echo "[+] 已写入 Zsh 包装 source 到 ~/.zshrc"
-    fi
+  if (( print_init_only == 1 )); then
+    print_init "$selected_shells"
+    exit 0
+  fi
+
+  local shells
+  shells="$(resolve_shells "$selected_shells")"
+
+  install_core
+
+  if (( skip_deps == 0 )); then
+    install_deps
   else
-    echo "[i] ~/.zshrc 已包含 Zsh 包装 source"
+    log "[i] 已跳过依赖安装"
   fi
-fi
 
-# ---------- Bash/POSIX 包装 ----------
-if [[ -f "${script_dir}/to.bash" ]]; then
-  dest_dir="${HOME}/.to-cd"
-  dest_file="${dest_dir}/to.bash"
-  mkdir -p "${dest_dir}"
-  install -Dm644 "${script_dir}/to.bash" "${dest_file}"
+  local sh
+  for sh in $shells; do
+    install_shell_integration "$sh"
+  done
 
-  source_line_bash='[ -r "$HOME/.to-cd/to.bash" ] && . "$HOME/.to-cd/to.bash"'
-  if ! grep -Fqx "$source_line_bash" "${HOME}/.bashrc" 2>/dev/null; then
-    printf '\n%s\n' "$source_line_bash" >> "${HOME}/.bashrc"
-    echo "[+] 已写入 Bash 包装 source 到 ~/.bashrc"
-  else
-    echo "[i] ~/.bashrc 已包含 Bash 包装 source"
-  fi
-  # 确保登录 shell 也加载 ~/.bashrc
-  if [[ ! -f "${HOME}/.bash_profile" ]] || ! grep -Eq '(\.|source) +~\/\.bashrc' "${HOME}/.bash_profile" 2>/dev/null; then
-    {
-      echo ''
-      echo '# Load ~/.bashrc for login shells'
-      echo 'if [ -f ~/.bashrc ]; then . ~/.bashrc; fi'
-    } >> "${HOME}/.bash_profile"
-    echo "[+] 已确保登录 Shell 通过 ~/.bash_profile 加载 ~/.bashrc"
-  fi
-  # 兼容 dash/ash：若有 ~/.profile 则也加入一行
-  if [[ -f "${HOME}/.profile" ]] && ! grep -Fqx "$source_line_bash" "${HOME}/.profile" 2>/dev/null; then
-    printf '\n%s\n' "$source_line_bash" >> "${HOME}/.profile"
-    echo "[+] 已在 ~/.profile 追加 POSIX 包装 source"
-  fi
-fi
+  print_reload_hint "$shells"
+}
 
-# ---------- Fish 包装 ----------
-if [[ -f "${script_dir}/to.fish" ]]; then
-  fish_func_dir="${HOME}/.config/fish/functions"
-  mkdir -p "${fish_func_dir}"
-  install -Dm644 "${script_dir}/to.fish" "${fish_func_dir}/to.fish"
-  echo "[+] 已安装 Fish 函数到 ${fish_func_dir}/to.fish"
-fi
-
-echo "[✓] 完成安装。请重载你的 Shell："
-echo "  Zsh:  source ~/.zshrc   或  exec zsh"
-echo "  Bash: source ~/.bashrc  或  exec bash"
-echo "  Fish: exec fish"
+main "$@"
