@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/.." && pwd)"
 prefix="${PREFIX:-/usr/local}"
 bindir="${prefix}/bin"
 skip_deps="${SKIP_DEPS:-0}"
@@ -25,7 +26,7 @@ usage() {
 统一安装脚本
 
 用法：
-  ./install.sh [选项]
+  ./scripts/install.sh [选项]
 
 选项：
   --prefix <PATH>         安装前缀，默认 /usr/local
@@ -38,11 +39,11 @@ usage() {
   -h, --help              显示帮助
 
 示例：
-  ./install.sh
-  ./install.sh --prefix "$HOME/.local"
-  ./install.sh --shell bash,zsh
-  ./install.sh --shell all --skip-deps
-  ./install.sh --print-init zsh
+  ./scripts/install.sh
+  ./scripts/install.sh --prefix "$HOME/.local"
+  ./scripts/install.sh --shell bash,zsh
+  ./scripts/install.sh --shell all --skip-deps
+  ./scripts/install.sh --print-init zsh
 EOF
 }
 
@@ -112,9 +113,9 @@ shell_init_line() {
 
 shell_wrapper_source() {
   case "$1" in
-    bash) printf '%s\n' "${script_dir}/to.bash" ;;
-    zsh)  printf '%s\n' "${script_dir}/to.zsh" ;;
-    fish) printf '%s\n' "${script_dir}/to.fish" ;;
+    bash) printf '%s\n' "${repo_root}/shell/to.bash" ;;
+    zsh)  printf '%s\n' "${repo_root}/shell/to.zsh" ;;
+    fish) printf '%s\n' "${repo_root}/shell/to.fish" ;;
     *) return 1 ;;
   esac
 }
@@ -191,7 +192,7 @@ install_file() {
 
 install_core() {
   log "[+] 安装核心可执行文件到 ${bindir}/to"
-  install_file "${script_dir}/to" "${bindir}/to" 755
+  install_file "${repo_root}/bin/to" "${bindir}/to" 755
 }
 
 install_shell_wrapper() {

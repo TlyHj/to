@@ -11,7 +11,7 @@ usage() {
 统一卸载脚本
 
 用法：
-  ./uninstall.sh [选项]
+  ./scripts/uninstall.sh [选项]
 
 选项：
   --prefix <PATH>      卸载前缀，默认 /usr/local
@@ -22,10 +22,10 @@ usage() {
   -h, --help           显示帮助
 
 示例：
-  ./uninstall.sh
-  ./uninstall.sh --prefix "$HOME/.local"
-  ./uninstall.sh --shell bash,zsh
-  ./uninstall.sh --remove-cache
+  ./scripts/uninstall.sh
+  ./scripts/uninstall.sh --prefix "$HOME/.local"
+  ./scripts/uninstall.sh --shell bash,zsh
+  ./scripts/uninstall.sh --remove-cache
 EOF
 }
 
